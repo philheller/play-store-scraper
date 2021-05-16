@@ -52,6 +52,7 @@ It works in 3 stages:\n1) Aquiring the list of apps to scrub through\n2) Going t
     parser.add_argument("--scroll", help="Define how long to wait (in sec.) during scroll down on query result page." + \
         " If no dynamically loaded this can be set to 0.", type=int, default=1)
     parser.add_argument("--quantity", help="Set the max amount of apps to scrub (in order proposed by the play store). Default is get all available apps (=-1)", type=int, default=-1)
+    parser.add_argument('-p', "--performance", help="Use a more performant process by leveraging beautifulsoup4.\nNeeded modules: requests, beautifulsoup4, lxml (can be installed via pip)", action="store_true")
     parser.add_argument("-d", "--web-driver", help="Set the location of the web-driver. Default assumes, that it is within the same dir as the script.",
                         type=str, default=f"{os.path.join(os.path.dirname(__file__), 'chromedriver.exe')}")
     parser.add_argument("-o", "--output", \
@@ -122,61 +123,148 @@ def get_apps_as_urls(driver, quantity, scroll):
         print(f"{bcolors.FAIL}error:{bcolors.ENDC} {sys.exc_info()[0]}")
     return urls
 
-def get_data_from_individual_apps(driver, apps_urls):
+def get_data_from_individual_apps_beautifulsoup(apps_urls):
+    # import additional modules to make bs4 work
+    from bs4 import BeautifulSoup
+    import requests
+    import traceback
+    
     apps_data = []
-    # for count in tqdm(range(8), unit="pages", desc="Looking through pages...", position=0, leave=False):
-    for app in tqdm(apps_urls, unit="pages", desc="Looking through Apps", position=0, leave=False):
+    
+    for app_url in tqdm(apps_urls, unit="pages", desc="Looking through Apps"):
+        response = requests.get(app_url).text
+        soup = BeautifulSoup(response, 'lxml')
+        
+        # extract as much as possible from header
         try:
-            driver.get(app)
+            app_header = soup.find('div', class_="sIskre")
+            app_name = app_header.find("h1", class_="AHFaub").text
+            app_age_requirements = app_header.find("div", class_="KmO8jd").text
+            app_producer = app_header.find("span", class_="T32cc").text
+            app_genre = app_header.find("a", class_="R8zArc", itemprop="genre").text
+        except TypeError as error:
+            tqdm.write(f"{bcolors.FAIL}There is a TypeError in the header: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
+        except AttributeError as error:
+            tqdm.write(f"{bcolors.FAIL}There is an AttributeError in the header: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
+        # separate ratings bc these are expected to be missing on some occassions.
+        try:
+            app_rating_div = app_header.find("div", class_="pf5lIe").div['aria-label']
+            app_rating = float(re.findall(r"[-+]?\d*\.\d+|\d+", app_rating_div.replace(",", "."))[0])
+            app_amount_ratings = int(app_header.find("span", class_="AYi5wd").text.replace(".", "").replace(",", "")) 
+        except TypeError as error:
+            app_rating=0
+            app_amount_ratings=0
+            tqdm.write(f"{bcolors.WARNING}There is a TypeError in the header: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
+        except AttributeError as error:
+            app_rating=0
+            app_amount_ratings=0
+            tqdm.write(f"{bcolors.WARNING}Missing rating:{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
+        
+        # extract rest from the additional information section
+        try:
+            additional_info = soup.find("div", class_="IxB2fe")
+            app_last_update = additional_info.select("div:nth-child(1)>span")[0].text
+            app_size = additional_info.select("div:nth-child(2)>span")[0].text
+            app_downloads = int(additional_info.select("div:nth-child(3)>span")[0].text.replace(",", "").replace(".", "").replace("+", ""))
+            app_current_version = additional_info.select("div:nth-child(4)>span")[0].text
+            app_necessary_android_version = additional_info.select("div:nth-child(5)>span")[0].text
+        except TypeError as error:
+            tqdm.write(f"{bcolors.FAIL}There is a TypeError in the 'more info' section: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
+        except AttributeError as error:
+            tqdm.write(f"{bcolors.FAIL}There is a AttributeError in the 'more info' section: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
+        except ValueError as error:
+            tqdm.write(f"{bcolors.FAIL}There is a ValueError in the 'more info' section: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
+            app_downloads = 0
+            app_current_version = "PLEASE CHECK AGAIN"
+            app_necessary_android_version = "PLEASE CHECK AGAIN"
+
+        app_data = produce_app_data_dict(app_name, app_rating, app_amount_ratings,
+                                            app_downloads, app_url, app_size, app_last_update, 
+                                            app_current_version, app_necessary_android_version, 
+                                            app_age_requirements, app_producer, app_genre)
+        apps_data.append(app_data)
+    return apps_data
+
+def get_data_from_individual_apps_selenium(driver, apps_urls):
+    apps_data = []
+    for app_url in tqdm(apps_urls, unit="pages", desc="Looking through Apps", position=0, leave=False):
+        try:
+            driver.get(app_url)
             app_name = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located(
                     (By.CSS_SELECTOR, ".AHFaub"))
-            )
+            ).text
         except (NoSuchWindowException, WebDriverException) as error:
             print(f"{error}\n{bcolors.FAIL}It seems that the window was closed...{bcolors.ENDC}")
             
         # get info from the additional info section
         try:
             additional_info = driver.find_element_by_css_selector(".IxB2fe")
-            last_update = additional_info.find_element_by_css_selector("div:nth-child(1)>span").text
-            size = additional_info.find_element_by_css_selector("div:nth-child(2)>span").text
-            downloads = int(additional_info.find_element_by_css_selector("div:nth-child(3)>span").text.replace(",", "").replace("+", ""))
-            current_version = additional_info.find_element_by_css_selector("div:nth-child(4)>span").text
-            necessary_Android_version = additional_info.find_element_by_css_selector("div:nth-child(5)>span").text
-            age_requirements = additional_info.find_element_by_css_selector("div:nth-child(6)>span .htlgb>div:nth-child(1)").text
+            app_last_update = additional_info.find_element_by_css_selector("div:nth-child(1)>span").text
+            app_size = additional_info.find_element_by_css_selector("div:nth-child(2)>span").text
+            app_downloads = int(additional_info.find_element_by_css_selector("div:nth-child(3)>span").text.replace(",", "").replace("+", ""))
+            app_current_version = additional_info.find_element_by_css_selector("div:nth-child(4)>span").text
+            app_necessary_android_version = additional_info.find_element_by_css_selector("div:nth-child(5)>span").text
         except ValueError:
-            tqdm.write(f"{bcolors.FAIL}There is a value error. This probably means a value was assigned to the wrong field: {bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app}{bcolors.ENDC}, {app_name.text}")
+            tqdm.write(f"{bcolors.FAIL}There is a value error. This probably means a value was assigned to the wrong field: {bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
         except NoSuchElementException:
-            tqdm.write(f"{bcolors.FAIL}Some element is missing. Consider rechecking in the file later (is marked with CHECK AGAIN):{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app}{bcolors.ENDC}, {app_name.text}")
-            age_requirements = "PLEASE CHECK AGAIN"
+            tqdm.write(f"{bcolors.FAIL}Some element is missing. Consider rechecking in the file later (is marked with CHECK AGAIN):{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
+        except NoSuchWindowException:
+            print(f"{bcolors.FAIL}It seems that the window was closed...")
 
         # get info from the ratings short description
         try:
-            amount_ratings_shortDescription = int(driver.find_element_by_css_selector("span.AYi5wd").text.replace(",", ""))
-            rsd = driver.find_element_by_css_selector(".pf5lIe>div")
-            rating_shortDescription = float(re.findall(r"[-+]?\d*\.\d+|\d+", rsd.get_attribute("aria-label").replace(",", "."))[0])
+            app_header = driver.find_element_by_css_selector("div.sIskre")
+            app_age_requirements = app_header.find_element_by_css_selector("div.KmO8jd").text
+            app_producer = app_header.find_element_by_css_selector("span.T32cc").text
+            app_genre = app_header.find_element_by_css_selector("a.R8zArc[itemprop=genre]").text
+        except ValueError:
+            tqdm.write(f"{bcolors.FAIL}There is a value error. This probably means a value was assigned to the wrong field: {bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
+        except NoSuchElementException:
+            tqdm.write(f"{bcolors.FAIL}Some element is missing. Consider rechecking in the file later (is marked with CHECK AGAIN):{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
+            app_age_requirements = "PLEASE CHECK AGAIN"
+            app_genre = "PLEASE CHECK AGAIN"
         except NoSuchWindowException:
             print(f"{bcolors.FAIL}It seems that the window was closed...")
-        except NoSuchElementException:
-            tqdm.write(f"{bcolors.WARNING}Missing rating:{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app}{bcolors.ENDC}, {app_name.text}")
-            rating_shortDescription = 0
-            amount_ratings_shortDescription = 0
 
-        app_data ={
-                "app_name" : app_name.text,
-                "app_rating" : rating_shortDescription,
-                "app_amount_ratings" : amount_ratings_shortDescription,
-                "app_amount_downloads" : downloads,
-                "app_url" : app,
-                "size" : size,
-                "last_update" : last_update,
-                "current_version" : current_version,
-                "necessary_android_version" : necessary_Android_version,
-                "age_requirements" : age_requirements,
-        }
+        try:
+            app_amount_ratings = int(app_header.find_element_by_css_selector("span.AYi5wd").text.replace(",", ""))
+            rsd = app_header.find_element_by_css_selector(".pf5lIe>div")
+            app_rating = float(re.findall(r"[-+]?\d*\.\d+|\d+", rsd.get_attribute("aria-label").replace(",", "."))[0])
+        except NoSuchElementException:
+            tqdm.write(f"{bcolors.WARNING}Missing rating:{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
+            app_rating = 0
+            app_amount_ratings = 0
+        except NoSuchWindowException:
+            print(f"{bcolors.FAIL}It seems that the window was closed...")
+            
+        app_data = produce_app_data_dict(app_name, app_rating, app_amount_ratings,
+                                         app_downloads, app_url, app_size, app_last_update, 
+                                         app_current_version, app_necessary_android_version, 
+                                         app_age_requirements, app_producer, app_genre)
         apps_data.append(app_data)
     driver.quit()
     return apps_data
+
+def produce_app_data_dict(app_name, app_rating, app_amount_ratings, 
+                          app_downloads, app_url, app_size, 
+                          app_last_update, app_current_version,
+                          app_necessary_android_version, app_age_requirements, app_producer, app_genre):
+    """Used to generate the app_data dictionary that is easily convertable to json and writable to csv"""
+    return {
+        "app_name" : app_name,
+        "app_rating" : app_rating,
+        "app_amount_ratings" : app_amount_ratings,
+        "app_amount_downloads" : app_downloads,
+        "app_url" : app_url,
+        "size" : app_size,
+        "last_update" : app_last_update,
+        "current_version" : app_current_version,
+        "necessary_android_version" : app_necessary_android_version,
+        "age_requirements" : app_age_requirements,
+        "app_producer" : app_producer,
+        "app_genre" : app_genre
+    }
 
 def write_to_csv_file(filename, data_to_write):
     if len(data_to_write) == 0:
@@ -187,13 +275,26 @@ def write_to_csv_file(filename, data_to_write):
         csv_columns.append(key)
 
     print(f"Writing results to {filename}...")
-    # writing to csv file
-    with open(filename, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=csv_columns)
-        writer.writeheader()
-        for data in data_to_write:
-            writer.writerow(data)
-
+    while True:
+        try:
+            # writing to csv file
+            with open(filename, 'w', newline='', encoding='utf-8') as file:
+                writer = csv.DictWriter(file, fieldnames=csv_columns)
+                writer.writeheader()
+                for data in data_to_write:
+                    writer.writerow(data)
+            print(f"{bcolors.OKGREEN}Data successfully written to {bcolors.OKBLUE}{bcolors.UNDERLINE}{filename}{bcolors.ENDC}{bcolors.OKGREEN}.{bcolors.ENDC}")
+            return
+        except PermissionError:
+            print(f"{bcolors.WARNING}Cannot write to the file... It may be currently open.\n"
+                + "Close the file to proceed.\nDo you wish to proceed? [yes/no]")
+            userinput = input()
+            if re.match(r"^(?:n|o)$", userinput, re.IGNORECASE):
+                print(f"{bcolors.OKCYAN}Exiting without writing to file...{bcolors.ENDC}")
+                return
+            elif re.match(r"^(?:y|yes)$", userinput, re.IGNORECASE):
+                print(f"{bcolors.OKCYAN}Attempting to write to file...{bcolors.ENDC}")
+         
 def evaluate_target_apps_from_args(url_argument, query_argument):
     match = re.findall(r"^([^&]*).*", urlparse(url_argument).query)[0][2:]
     if match != DEFAULT_QUERY:
@@ -224,9 +325,9 @@ def Main():
     except WebDriverNotFound:
         print(f"{bcolors.FAIL}exception.WebDriverNotFound raised. Exiting program.{bcolors.ENDC}")
         return
-
+        
     specific_target = evaluate_target_apps_from_args(args.URL, args.query)
-    print(f"Looking through '{bcolors.OKBLUE}{specific_target}{bcolors.ENDC}'")
+    print(f"Looking through '{bcolors.OKBLUE}{bcolors.UNDERLINE}{specific_target}{bcolors.ENDC}'")
     if os.path.isfile(args.output):
        print(f"{bcolors.WARNING}Watch out, the file already exists. Will be overwritten at the end!{bcolors.ENDC}")
     
@@ -234,7 +335,14 @@ def Main():
     driver.get(specific_target)
     urls = get_apps_as_urls(driver, args.quantity, args.scroll)
     print(f"\n{bcolors.HEADER}[Step 2] {bcolors.UNDERLINE}Looking through individual URLs and getting App Data{bcolors.ENDC}\n")
-    apps_data = get_data_from_individual_apps(driver, urls)
+    if not args.performance:
+        print(f"{bcolors.OKGREEN}Decided to go with Selenium {bcolors.OKCYAN}(This will reduce speed and performance - consider using beautifulsoup [check menu with -h]){bcolors.ENDC}")
+        apps_data = get_data_from_individual_apps_selenium(driver, urls)
+    else:
+        driver.quit()
+        print(f"{bcolors.OKGREEN}Decided to go with BeautifulSoup{bcolors.ENDC}")
+        
+        apps_data = get_data_from_individual_apps_beautifulsoup(urls)
     
     print(f"\n{bcolors.HEADER}[Step 3] {bcolors.UNDERLINE}Writing results to file{bcolors.ENDC}\n")
     write_to_csv_file(args.output, apps_data)
