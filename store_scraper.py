@@ -52,7 +52,8 @@ It works in 3 stages:\n1) Aquiring the list of apps to scrub through\n2) Going t
     parser.add_argument("--scroll", help="Define how long to wait (in sec.) during scroll down on query result page." + \
         " If no dynamically loaded this can be set to 0.", type=int, default=1)
     parser.add_argument("--quantity", help="Set the max amount of apps to scrub (in order proposed by the play store). Default is get all available apps (=-1)", type=int, default=-1)
-    parser.add_argument('-p', "--performance", help="Use a more performant process by leveraging beautifulsoup4.\nNeeded modules: requests, beautifulsoup4, lxml (can be installed via pip)", action="store_true")
+    parser.add_argument('-p', "--performance", help="Use a more performant process by leveraging beautifulsoup4.\nNeeded modules: requests, beautifulsoup4, lxml (can be installed via pip).\n" + 
+                        "Ratings and amount of ratings may suffer in recognition since it is loaded dynamically.", action="store_true")
     parser.add_argument("-d", "--web-driver", help="Set the location of the web-driver. Default assumes, that it is within the same dir as the script.",
                         type=str, default=f"{os.path.join(os.path.dirname(__file__), 'chromedriver.exe')}")
     parser.add_argument("-o", "--output", \
@@ -148,9 +149,11 @@ def get_data_from_individual_apps_beautifulsoup(apps_urls):
             tqdm.write(f"{bcolors.FAIL}There is an AttributeError in the header: {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}\n{error}\n{traceback.print_exc()}")
         # separate ratings bc these are expected to be missing on some occassions.
         try:
-            app_rating_div = app_header.find("div", class_="pf5lIe").div['aria-label']
-            app_rating = float(re.findall(r"[-+]?\d*\.\d+|\d+", app_rating_div.replace(",", "."))[0])
-            app_amount_ratings = int(app_header.find("span", class_="AYi5wd").text.replace(".", "").replace(",", "")) 
+            app_rating_div = app_header.find("div", class_="pf5lIe").div
+            replaced_comma = app_rating_div["aria-label"].replace(",", ".")
+            reg_res = re.findall(r"\d+\.?\d+", replaced_comma)
+            app_rating = float(reg_res[0])
+            app_amount_ratings = int(str(app_header.find("span", class_="AYi5wd").text).replace(".", "").replace(",", "")) 
         except TypeError as error:
             app_rating=0
             app_amount_ratings=0
@@ -158,7 +161,7 @@ def get_data_from_individual_apps_beautifulsoup(apps_urls):
         except AttributeError as error:
             app_rating=0
             app_amount_ratings=0
-            tqdm.write(f"{bcolors.WARNING}Missing rating:{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
+            tqdm.write(f"{bcolors.WARNING}Attribute Error: Probably Missing Rating:{bcolors.ENDC} {bcolors.OKBLUE}{bcolors.UNDERLINE}{app_url}{bcolors.ENDC}, {app_name}")
         
         # extract rest from the additional information section
         try:
@@ -346,7 +349,8 @@ def Main():
     
     print(f"\n{bcolors.HEADER}[Step 3] {bcolors.UNDERLINE}Writing results to file{bcolors.ENDC}\n")
     write_to_csv_file(args.output, apps_data)
-
+    # temp_res = get_data_from_individual_apps_beautifulsoup(["https://play.google.com/store/apps/details?id=com.emailYahoo.socialMedia"]) 
+    # print(f"Final result:\n {temp_res}")
 
 
 if __name__ == "__main__":
